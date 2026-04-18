@@ -1,924 +1,586 @@
-"""
-╔══════════════════════════════════════════════════════════════╗
-║         Mobile Inventory & Sales Suite                       ║
-║         نظام إدارة مخازن ومبيعات الهواتف الذكية             ║
-║         Built with Python + Streamlit + SQLite               ║
-╚══════════════════════════════════════════════════════════════╝
-"""
+# =============================================================================
+#  app.py  —  Mobile Store Management System
+#  Entry point for the Streamlit application.
+#  All page logic is delegated to dedicated modules.
+# =============================================================================
 
 import streamlit as st
-import easyocr
-import numpy as np
-from PIL import Image
-
-# تعريف القارئ مرة واحدة عشان ميبطأش البرنامج
-@st.cache_resource
-def load_ocr():
-    return easyocr.Reader(['en'])
-
-reader = load_ocr()
 import pandas as pd
-from datetime import datetime, date
-import io
+from datetime import date, datetime
 
-# ─── استيراد الوحدات الداخلية ───────────────────────────────
-from database import init_db, get_connection
+# ── Internal modules ──────────────────────────────────────────────────────────
+from database import (
+    get_connection,
+    init_db,
+)
 from inventory import (
-    add_device, get_all_devices, get_available_devices,
-    search_devices, get_aging_devices, get_device_by_imei
+    load_inventory,
+    add_device,
+    update_device,
+    delete_device,
 )
 from sales import (
-    sell_device, get_all_sales, get_sales_summary,
-    get_weekly_sales, get_top_brands
+    load_sales,
+    record_sale,
+    get_device_by_imei,
 )
-from reports import export_inventory_excel, export_sales_excel
-
-# ─── إعداد الصفحة ───────────────────────────────────────────
-st.set_page_config(
-    page_title="Mobile Suite | نظام المخازن",
-    page_icon="📱",
-    layout="wide",
-    initial_sidebar_state="expanded"
+from reports import (
+    sales_summary,
+    inventory_summary,
+    top_selling_models,
+    low_stock_alert,
 )
 
-# ─── تحميل CSS المخصص ───────────────────────────────────────
-def load_css():
-    st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600;700;900&family=JetBrains+Mono:wght@400;700&display=swap');
+# ── Optional OCR (imported lazily inside the page to avoid hard dependency) ──
+# easyocr is only used in page_sales(); the @st.cache_resource reader lives
+# there so it is initialised once and never blocks other pages.
 
-    :root {
-        --bg-primary: #0a0e1a;
-        --bg-card: #111827;
-        --bg-card-hover: #1a2435;
-        --accent-cyan: #00d4ff;
-        --accent-green: #00ff88;
-        --accent-orange: #ff6b35;
-        --accent-red: #ff3366;
-        --accent-purple: #7c3aed;
-        --text-primary: #f0f4ff;
-        --text-secondary: #8892a4;
-        --border: rgba(0, 212, 255, 0.15);
-        --glow: 0 0 20px rgba(0, 212, 255, 0.3);
-    }
 
-    /* ── الخلفية العامة ── */
-    .stApp {
-        background: var(--bg-primary);
-        background-image:
-            radial-gradient(ellipse at 10% 20%, rgba(0, 212, 255, 0.05) 0%, transparent 60%),
-            radial-gradient(ellipse at 90% 80%, rgba(0, 255, 136, 0.03) 0%, transparent 60%);
-        font-family: 'Cairo', sans-serif;
-    }
+# =============================================================================
+#  1.  CONFIGURATION & STYLING
+# =============================================================================
 
-    /* ── الشريط الجانبي ── */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0d1421 0%, #111827 100%);
-        border-right: 1px solid var(--border);
-    }
+def set_page_config() -> None:
+    """Configure global Streamlit page settings."""
+    st.set_page_config(
+        page_title="Mobile Store Manager",
+        page_icon="📱",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
 
-    [data-testid="stSidebar"] .stMarkdown h1,
-    [data-testid="stSidebar"] .stMarkdown h2,
-    [data-testid="stSidebar"] .stMarkdown h3 {
-        color: var(--accent-cyan) !important;
-    }
 
-    /* ── بطاقات KPI ── */
-    .kpi-card {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        padding: 24px 20px;
-        text-align: center;
-        position: relative;
-        overflow: hidden;
-        transition: transform 0.2s, box-shadow 0.2s;
-    }
-    .kpi-card::before {
-        content: '';
-        position: absolute;
-        top: 0; left: 0; right: 0;
-        height: 3px;
-        background: var(--accent-color, var(--accent-cyan));
-    }
-    .kpi-card:hover {
-        transform: translateY(-2px);
-        box-shadow: var(--glow);
-    }
-    .kpi-value {
-        font-size: 2.2rem;
-        font-weight: 900;
-        color: var(--accent-color, var(--accent-cyan));
-        font-family: 'JetBrains Mono', monospace;
-        line-height: 1.2;
-    }
-    .kpi-label {
-        font-size: 0.85rem;
-        color: var(--text-secondary);
-        margin-top: 6px;
-        font-weight: 600;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
-    }
-    .kpi-icon {
-        font-size: 1.8rem;
-        margin-bottom: 8px;
-    }
-
-    /* ── تنبيهات الأجهزة القديمة ── */
-    .aging-alert {
-        background: linear-gradient(135deg, rgba(255, 107, 53, 0.15), rgba(255, 51, 102, 0.1));
-        border: 1px solid rgba(255, 107, 53, 0.4);
-        border-left: 4px solid var(--accent-orange);
-        border-radius: 12px;
-        padding: 16px 20px;
-        margin: 8px 0;
-        direction: rtl;
-    }
-    .aging-alert-title {
-        color: var(--accent-orange);
-        font-weight: 700;
-        font-size: 1rem;
-    }
-    .aging-alert-body {
-        color: var(--text-secondary);
-        font-size: 0.9rem;
-        margin-top: 4px;
-    }
-
-    /* ── الجداول ── */
-    [data-testid="stDataFrame"] {
-        border: 1px solid var(--border) !important;
-        border-radius: 12px !important;
-        overflow: hidden;
-    }
-
-    /* ── عناوين الأقسام ── */
-    .section-header {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        margin: 24px 0 16px;
-        padding-bottom: 12px;
-        border-bottom: 1px solid var(--border);
-        direction: rtl;
-    }
-    .section-header h2 {
-        color: var(--text-primary);
-        font-size: 1.4rem;
-        font-weight: 700;
-        margin: 0;
-    }
-    .section-accent {
-        width: 4px;
-        height: 28px;
-        background: var(--accent-cyan);
-        border-radius: 2px;
-    }
-
-    /* ── باج الحالة ── */
-    .badge {
-        display: inline-block;
-        padding: 3px 10px;
-        border-radius: 20px;
-        font-size: 0.75rem;
-        font-weight: 700;
-        letter-spacing: 0.05em;
-    }
-    .badge-available {
-        background: rgba(0, 255, 136, 0.15);
-        color: var(--accent-green);
-        border: 1px solid rgba(0, 255, 136, 0.3);
-    }
-    .badge-sold {
-        background: rgba(255, 51, 102, 0.15);
-        color: var(--accent-red);
-        border: 1px solid rgba(255, 51, 102, 0.3);
-    }
-    .badge-aging {
-        background: rgba(255, 107, 53, 0.15);
-        color: var(--accent-orange);
-        border: 1px solid rgba(255, 107, 53, 0.3);
-    }
-
-    /* ── أزرار مخصصة ── */
-    .stButton > button {
-        background: linear-gradient(135deg, var(--accent-cyan), #0099cc);
-        color: #0a0e1a;
-        font-family: 'Cairo', sans-serif;
-        font-weight: 700;
-        border: none;
-        border-radius: 10px;
-        padding: 8px 20px;
-        transition: all 0.2s;
-        letter-spacing: 0.03em;
-    }
-    .stButton > button:hover {
-        transform: translateY(-1px);
-        box-shadow: 0 4px 20px rgba(0, 212, 255, 0.4);
-    }
-
-    /* ── Logo / Brand ── */
-    .brand-logo {
-        text-align: center;
-        padding: 20px 0 30px;
-        border-bottom: 1px solid var(--border);
-        margin-bottom: 20px;
-    }
-    .brand-logo .logo-icon { font-size: 2.5rem; }
-    .brand-logo .logo-title {
-        font-size: 1.1rem;
-        font-weight: 900;
-        color: var(--accent-cyan);
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-    }
-    .brand-logo .logo-sub {
-        font-size: 0.75rem;
-        color: var(--text-secondary);
-        margin-top: 4px;
-    }
-
-    /* ── صندوق البحث بالسكانر ── */
-    .scanner-box {
-        background: linear-gradient(135deg, rgba(0, 212, 255, 0.08), rgba(0, 255, 136, 0.05));
-        border: 1px dashed rgba(0, 212, 255, 0.4);
-        border-radius: 16px;
-        padding: 24px;
-        text-align: center;
-        margin-bottom: 20px;
-    }
-    .scanner-icon { font-size: 2rem; margin-bottom: 8px; }
-    .scanner-hint { color: var(--text-secondary); font-size: 0.85rem; }
-
-    /* ── الخطوط العربية ── */
-    h1, h2, h3, p, label, .stMarkdown {
-        font-family: 'Cairo', sans-serif !important;
-        direction: rtl;
-        text-align: right;
-    }
-
-    /* ── إخفاء عناصر Streamlit الافتراضية ── */
-   
-
-    /* ── input fields ── */
-    .stTextInput input, .stNumberInput input, .stSelectbox select {
-        background: var(--bg-card) !important;
-        border: 1px solid var(--border) !important;
-        color: var(--text-primary) !important;
-        border-radius: 8px !important;
-        font-family: 'Cairo', sans-serif !important;
-    }
-    .stTextInput input:focus {
-        border-color: var(--accent-cyan) !important;
-        box-shadow: 0 0 0 2px rgba(0, 212, 255, 0.2) !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-# ─── دالة مساعدة لعرض KPI Card ────────────────────────────
-def kpi_card(icon, value, label, color="var(--accent-cyan)"):
-    st.markdown(f"""
-    <div class="kpi-card" style="--accent-color: {color}">
-        <div class="kpi-icon">{icon}</div>
-        <div class="kpi-value">{value}</div>
-        <div class="kpi-label">{label}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-# ─── دالة مساعدة لعرض عنوان قسم ───────────────────────────
-def section_header(title, icon=""):
-    st.markdown(f"""
-    <div class="section-header">
-        <div class="section-accent"></div>
-        <h2>{icon} {title}</h2>
-    </div>
-    """, unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════════
-# الشريط الجانبي للتنقل
-# ══════════════════════════════════════════════════════════════
-def render_sidebar():
-    with st.sidebar:
-        # الشعار
-        st.markdown("""
-        <div class="brand-logo">
-            <div class="logo-icon">📱</div>
-            <div class="logo-title">Mobile Suite</div>
-            <div class="logo-sub">نظام إدارة المخازن والمبيعات</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # قائمة التنقل
-        st.markdown("### 🗂️ القائمة الرئيسية")
-        pages = {
-            "📊 لوحة التحكم": "dashboard",
-            "📦 المخزن": "inventory",
-            "💰 المبيعات": "sales",
-            "🔍 البحث الذكي": "search",
-            "📈 التقارير": "reports",
-        }
-        selected = st.radio(
-            "اختر القسم",
-            list(pages.keys()),
-            label_visibility="collapsed"
-        )
-
-        # إحصاءات سريعة في الشريط الجانبي
-        st.markdown("---")
-        conn = get_connection()
-        total = pd.read_sql("SELECT COUNT(*) as n FROM inventory", conn).iloc[0]['n']
-        available = pd.read_sql("SELECT COUNT(*) as n FROM inventory WHERE status='Available'", conn).iloc[0]['n']
-        sold_today = pd.read_sql(
-            "SELECT COUNT(*) as n FROM sales WHERE DATE(sale_date)=DATE('now')", conn
-        ).iloc[0]['n']
-        conn.close()
-
-        st.markdown("### 📌 إحصاء سريع")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("إجمالي", total)
-            st.metric("متاح", available)
-        with col2:
-            st.metric("مبيع", total - available)
-            st.metric("اليوم", sold_today)
-
-        st.markdown("---")
-        st.markdown(f"<small style='color:#8892a4'>آخر تحديث: {datetime.now().strftime('%H:%M')}</small>",
-                    unsafe_allow_html=True)
-
-        return pages[selected]
-
-# ══════════════════════════════════════════════════════════════
-# صفحة: لوحة التحكم (Dashboard)
-# ══════════════════════════════════════════════════════════════
-def page_dashboard():
-    section_header("لوحة التحكم التحليلية", "📊")
-
-    conn = get_connection()
-    summary = get_sales_summary(conn)
-    conn.close()
-
-    # ── KPI Cards ────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        kpi_card("💵", f"{summary['total_profit']:,.0f} ج", "إجمالي الأرباح", "var(--accent-green)")
-    with c2:
-        kpi_card("📦", str(summary['available_devices']), "أجهزة متاحة", "var(--accent-cyan)")
-    with c3:
-        kpi_card("🏆", summary['top_brand'] or "—", "الماركة الأكثر مبيعاً", "var(--accent-orange)")
-    with c4:
-        kpi_card("🛒", str(summary['total_sales']), "إجمالي المبيعات", "var(--accent-purple)")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── الرسوم البيانية ──────────────────────────────────────
-    col_left, col_right = st.columns([3, 2])
-
-    with col_left:
-        section_header("نمو المبيعات الأسبوعي", "📈")
-        conn = get_connection()
-        weekly = get_weekly_sales(conn)
-        conn.close()
-        if not weekly.empty:
-            st.bar_chart(
-                weekly.set_index('week')['sales_count'],
-                color="#00d4ff",
-                use_container_width=True
-            )
-        else:
-            st.info("لا توجد بيانات مبيعات حتى الآن")
-
-    with col_right:
-        section_header("المبيعات حسب الماركة", "🏷️")
-        conn = get_connection()
-        brands = get_top_brands(conn)
-        conn.close()
-        if not brands.empty:
-            st.bar_chart(
-                brands.set_index('brand')['count'],
-                color="#00ff88",
-                use_container_width=True
-            )
-        else:
-            st.info("لا توجد بيانات حتى الآن")
-
-    # ── تنبيهات الأجهزة القديمة (Aging Stock) ───────────────
-    section_header("⚠️ تنبيهات المخزن القديم (أكثر من 30 يوم)", "🔔")
-    conn = get_connection()
-    aging = get_aging_devices(conn)
-    conn.close()
-
-    if not aging.empty:
-        st.markdown(f"""
-        <div class="aging-alert">
-            <div class="aging-alert-title">⚠️ تحذير: {len(aging)} جهاز في المخزن أكثر من 30 يوم</div>
-            <div class="aging-alert-body">هذه الأجهزة تحتاج إلى مراجعة السعر أو عرض خصم لتسريع المبيع</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # تلوين الأجهزة القديمة
-        aging['⚠️ أيام في المخزن'] = aging['days_in_stock']
-        display_cols = ['brand', 'model', 'color', 'imei', 'expected_sale_price', '⚠️ أيام في المخزن']
-        rename_map = {
-            'brand': 'الماركة', 'model': 'الموديل', 'color': 'اللون',
-            'imei': 'IMEI', 'expected_sale_price': 'سعر البيع المتوقع'
-        }
-        st.dataframe(
-            aging[display_cols].rename(columns=rename_map),
-            use_container_width=True,
-            hide_index=True
-        )
-    else:
-        st.success("✅ لا توجد أجهزة قديمة في المخزن — المخزن في وضع جيد!")
-
-# ══════════════════════════════════════════════════════════════
-# صفحة: المخزن (Inventory)
-# ══════════════════════════════════════════════════════════════
-def page_inventory():
-    section_header("إدارة المخزن", "📦")
-
-    tab1, tab2 = st.tabs(["➕ إضافة جهاز جديد", "📋 قائمة المخزن"])
-
-    # ── تبويب: إضافة جهاز ───────────────────────────────────
-    with tab1:
-        # صندوق السكانر
-        st.markdown("""
-        <div class="scanner-box">
-            <div class="scanner-icon">📷</div>
-            <div style="color: var(--accent-cyan); font-weight: 700; font-size: 1rem;">
-                إدخال IMEI بالسكانر أو الكتابة اليدوية
-            </div>
-            <div class="scanner-hint">
-                وجّه السكانر نحو الباركود أو اكتب الـ IMEI يدوياً — يدعم auto-focus
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        with st.form("add_device_form", clear_on_submit=True):
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-                brand = st.selectbox("🏷️ الماركة", [
-                    "Samsung", "Apple", "Huawei", "Xiaomi", "OPPO",
-                    "Vivo", "OnePlus", "Realme", "Nokia", "Sony", "Other"
-                ])
-                model = st.text_input("📱 الموديل", placeholder="مثال: Galaxy S24 Ultra")
-                color = st.text_input("🎨 اللون", placeholder="مثال: Phantom Black")
-
-            with col2:
-                # حقل IMEI مع auto-focus hint
-                imei = st.text_input(
-                    "🔢 IMEI / Serial Number *",
-                    placeholder="امسح البار كود أو اكتب الـ IMEI هنا...",
-                    help="يمكنك استخدام السكانر مباشرةً في هذا الحقل — الحقل جاهز للاستقبال"
-                )
-                purchase_price = st.number_input("💸 سعر الشراء (ج.م)", min_value=0.0, step=50.0)
-                expected_sale_price = st.number_input("🎯 سعر البيع المتوقع (ج.م)", min_value=0.0, step=50.0)
-
-            with col3:
-                entry_date = st.date_input("📅 تاريخ الإدخال", value=date.today())
-                st.markdown("<br>", unsafe_allow_html=True)
-                # معاينة الربح المتوقع
-                expected_profit = expected_sale_price - purchase_price
-                profit_color = "#00ff88" if expected_profit > 0 else "#ff3366"
-                st.markdown(f"""
-                <div style="background: var(--bg-card); border: 1px solid var(--border);
-                     border-radius: 10px; padding: 16px; text-align: center;">
-                    <div style="color: var(--text-secondary); font-size: 0.8rem;">الربح المتوقع</div>
-                    <div style="color: {profit_color}; font-size: 1.8rem; font-weight: 900;
-                         font-family: 'JetBrains Mono', monospace;">
-                        {expected_profit:,.0f} ج
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-            submit = st.form_submit_button("✅ إضافة الجهاز للمخزن", use_container_width=True)
-
-            if submit:
-                if not imei or not model:
-                    st.error("❌ الرجاء إدخال الموديل والـ IMEI على الأقل")
-                else:
-                    conn = get_connection()
-                    success, msg = add_device(
-                        conn, brand, model, color, imei,
-                        purchase_price, expected_sale_price, str(entry_date)
-                    )
-                    conn.close()
-                    if success:
-                        st.success(f"✅ تم إضافة {brand} {model} بنجاح!")
-                        st.balloons()
-                    else:
-                        st.error(f"❌ خطأ: {msg}")
-
-    # ── تبويب: قائمة المخزن ──────────────────────────────────
-    with tab2:
-        conn = get_connection()
-        devices = get_all_devices(conn)
-        conn.close()
-
-        if devices.empty:
-            st.info("📭 المخزن فارغ حالياً — ابدأ بإضافة أجهزة")
-        else:
-            # فلتر الحالة
-            status_filter = st.selectbox(
-                "فلتر الحالة",
-                ["الكل", "Available - متاح", "Sold - مباع"],
-                label_visibility="visible"
-            )
-
-            if "Available" in status_filter:
-                devices = devices[devices['status'] == 'Available']
-            elif "Sold" in status_filter:
-                devices = devices[devices['status'] == 'Sold']
-
-            # إعادة تسمية الأعمدة للعربية
-            rename_map = {
-                'id': '#', 'brand': 'الماركة', 'model': 'الموديل',
-                'color': 'اللون', 'imei': 'IMEI',
-                'purchase_price': 'سعر الشراء', 'expected_sale_price': 'سعر البيع',
-                'status': 'الحالة', 'entry_date': 'تاريخ الإدخال',
-                'days_in_stock': 'أيام بالمخزن'
+def inject_custom_css() -> None:
+    """Inject application-wide CSS overrides."""
+    st.markdown(
+        """
+        <style>
+            /* ── Sidebar ── */
+            [data-testid="stSidebar"] {
+                background: linear-gradient(180deg, #0f172a 0%, #1e293b 100%);
             }
-            display = devices.rename(columns=rename_map)
+            [data-testid="stSidebar"] * {
+                color: #e2e8f0 !important;
+            }
 
-            st.dataframe(display, use_container_width=True, hide_index=True)
-            st.caption(f"إجمالي: {len(devices)} جهاز")
+            /* ── Radio menu items ── */
+            div[role="radiogroup"] label {
+                padding: 0.5rem 0.75rem;
+                border-radius: 8px;
+                transition: background 0.2s;
+            }
+            div[role="radiogroup"] label:hover {
+                background: rgba(255,255,255,0.08);
+            }
 
-# ══════════════════════════════════════════════════════════════
-# صفحة: المبيعات (Sales)
-# ══════════════════════════════════════════════════════════════
-def page_sales():
-    section_header("تسجيل المبيعات", "💰")
+            /* ── Metric cards ── */
+            [data-testid="stMetric"] {
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 12px;
+                padding: 1rem 1.25rem;
+            }
 
-    tab1, tab2 = st.tabs(["💳 تسجيل عملية بيع", "📋 سجل المبيعات"])
+            /* ── Primary button ── */
+            .stButton > button[kind="primary"] {
+                background: #6366f1;
+                border: none;
+                border-radius: 8px;
+                font-weight: 600;
+            }
+            .stButton > button[kind="primary"]:hover {
+                background: #4f46e5;
+            }
 
-    with tab1:
-        # صندوق السكانر للبيع
-        st.markdown("""
-        <div class="scanner-box">
-            <div class="scanner-icon">🔍</div>
-            <div style="color: var(--accent-green); font-weight: 700;">ابحث عن الجهاز بالـ IMEI</div>
-            <div class="scanner-hint">استخدم السكانر أو اكتب الـ IMEI للعثور على الجهاز</div>
-        </div>
-        """, unsafe_allow_html=True)
+            /* ── Data tables ── */
+            [data-testid="stDataFrame"] table {
+                border-radius: 8px;
+                overflow: hidden;
+            }
 
-        # البحث عن الجهاز أولاً
-        # إضافة كاميرا الموبايل للمسح
-       # 1. الكاميرا للمسح
-img_file = st.camera_input("📷 امسح السيريال نمبر (IMEI) من علبة الموبايل")
+            /* ── Section divider ── */
+            hr { border-color: #e2e8f0; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-detected_imei = ""
 
-# 2. تحليل الصورة لو المستخدم صور
-if img_file:
-    image = Image.open(img_file)
-    img_array = np.array(image)
-    
-    with st.spinner('جاري استخراج السيريال...'):
-        try:
-            # استخدام الـ reader اللي عرفناه فوق خالص
-            result = reader.readtext(img_array)
-            for (bbox, text, prob) in result:
-                clean_text = "".join(text.split())
-                # التأكد إن الرقم 15 خانة (نظام الـ IMEI)
-                if len(clean_text) == 15 and clean_text.isdigit():
-                    detected_imei = clean_text
-                    st.success(f"✅ تم التقاط السيريال: {detected_imei}")
-                    break
-        except Exception as e:
-            st.error("حدث خطأ في القراءة، حاول تقرب الكاميرا من الرقم")
+# =============================================================================
+#  2.  DATABASE INITIALISATION
+# =============================================================================
 
-# 3. خانة الإدخال (تاخد القيمة أوتوماتيك من المتغير detected_imei)
-search_imei = st.text_input("🔢 IMEI / Serial", value=detected_imei, key="sale_imei_search")
+def initialise_database() -> None:
+    """
+    Create all required tables if they do not yet exist.
+    Wraps init_db() so a cold start never crashes the app.
+    """
+    try:
+        init_db()
+    except Exception as exc:
+        st.error(f"⚠️ Database initialisation failed: {exc}")
 
-device_info = None
-if search_imei:
-    conn = get_connection()
-    device_info = get_device_by_imei(conn, search_imei)
-    conn.close()
 
-if device_info:
-    if device_info['status'] == 'Sold':
-        st.error(f"❌ هذا الجهاز تم بيعه مسبقاً")
-        device_info = None
-    else:
-        st.success(f"✅ تم العثور على الجهاز: {device_info['brand']} {device_info['model']} — {device_info['color']}")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("سعر الشراء", f"{device_info['purchase_price']:,.0f} ج")
-        with col2:
-            st.metric("السعر المتوقع", f"{device_info['expected_sale_price']:,.0f} ج")
-        with col3:
-            st.metric("أيام بالمخزن", device_info.get('days_in_stock', 0))
-else:
-    st.warning("⚠️ لم يتم العثور على الجهاز — تحقق من الـ IMEI")
+# =============================================================================
+#  3.  SIDEBAR
+# =============================================================================
 
-st.markdown("---")
-
-# --- المحرك الرئيسي للتنقل ---
-# نادى على الـ Sidebar أولاً وخزن الاختيار في متغير
-selected = render_sidebar()
-
-# قاموس لربط الأسماء العربية بالوظائف البرمجية
-pages_map = {
-    "لوحة التحكم": "dashboard",
-    "المخزن": "inventory",
-    "المبيعات": "sales",
-    "البحث الذكي": "search",
-    "التقارير": "reports"
+PAGES = {
+    "🏠 لوحة التحكم":  "dashboard",
+    "📦 المخزن":        "inventory",
+    "💰 المبيعات":      "sales",
+    "🔍 البحث الذكي":  "search",
+    "📊 التقارير":      "reports",
 }
 
-# التنفيذ بناءً على الصفحة المختارة
-if selected in pages_map:
-    page = pages_map[selected]
-    
-    if page == "inventory":
-        from inventory import render_inventory_page
-        render_inventory_page()
-    elif page == "sales":
-        # هنا هتحط كود صفحة المبيعات كله (بما فيه الـ Form اللي في صورة 17d761)
-        st.header("🛒 قسم المبيعات")
-        # استدعاء دالة المبيعات اللي فيها الكاميرا
-        render_sales_page() 
-    elif page == "reports":
-        from reports import render_reports_page
-        render_reports_page()
 
-with st.form("sale_form", clear_on_submit=True):
-    col1, col2 = st.columns(2)
+def render_sidebar() -> str:
+    """
+    Render the navigation sidebar.
 
-    with col1:
-        sale_imei = st.text_input(
-            "🔢 IMEI المؤكد",
-            value=search_imei if device_info else "",
-            placeholder="IMEI الجهاز"
+    Returns
+    -------
+    str
+        Internal page key (e.g. 'dashboard', 'sales', …).
+    """
+    with st.sidebar:
+        # ── Logo / brand ────────────────────────────────────────────────────
+        st.markdown(
+            "<h2 style='text-align:center; margin-bottom:0.25rem;'>📱</h2>"
+            "<h3 style='text-align:center; margin-top:0; color:#a5b4fc;'>"
+            "Mobile Store</h3>",
+            unsafe_allow_html=True,
         )
-        customer_name = st.text_input("👤 اسم العميل", placeholder="الاسم الكامل")
-        customer_phone = st.text_input("📞 رقم الهاتف", placeholder="01xxxxxxxxx")
+        st.divider()
 
-    with col2:
-        default_price = device_info['expected_sale_price'] if device_info else 0.0
-        actual_price = st.number_input(
-            "💵 سعر البيع الفعلي (ج.م)",
-            min_value=0.0,
-            value=float(default_price),
-            step=50.0
-        )
-        sale_date = st.date_input("📅 تاريخ البيع", value=date.today())
-
-        # معاينة الربح
-        if device_info:
-            profit = actual_price - device_info['purchase_price']
-            profit_color = "#00ff88" if profit > 0 else "#ff3366"
-            st.markdown(f"""
-            <div style="background: var(--bg-card); border: 1px solid var(--border);
-                    border-radius: 10px; padding: 16px; text-align: center; margin-top: 8px;">
-                <div style="color: var(--text-secondary); font-size: 0.8rem;">الربح المتوقع</div>
-                <div style="color: {profit_color}; font-size: 1.8rem; font-weight: 900;
-                        font-family: 'JetBrains Mono', monospace;">
-                    {profit:,.0f} ج
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-    submit_sale = st.form_submit_button("✅ تأكيد البيع", use_container_width=True)
-
-    if submit_sale:
-        if not sale_imei:
-            st.error("❌ الرجاء إدخال الـ IMEI")
-        else:
+        # ── Quick KPIs (safe – wrapped in try/except) ────────────────────────
+        try:
             conn = get_connection()
-            success, msg = sell_device(
-                conn, sale_imei, actual_price,
-                customer_name, customer_phone, str(sale_date)
-            )
+            total_devices = pd.read_sql("SELECT COUNT(*) AS n FROM inventory", conn).iloc[0]["n"]
+            today_sales   = pd.read_sql(
+                "SELECT COUNT(*) AS n FROM sales WHERE DATE(sale_date) = DATE('now')",
+                conn,
+            ).iloc[0]["n"]
             conn.close()
-            if success:
-                st.success(f"🎉 تم تسجيل البيع بنجاح! {msg}")
-                st.balloons()
+
+            col1, col2 = st.columns(2)
+            col1.metric("📦 أجهزة", int(total_devices))
+            col2.metric("💳 مبيعات اليوم", int(today_sales))
+        except Exception:
+            # Tables may not exist yet on first run – silently skip.
+            pass
+
+        st.divider()
+
+        # ── Navigation menu ──────────────────────────────────────────────────
+        st.markdown("**القائمة الرئيسية**")
+        choice_label = st.radio(
+            label="",
+            options=list(PAGES.keys()),
+            label_visibility="collapsed",
+        )
+
+        st.divider()
+        st.caption(f"📅 {date.today().strftime('%Y-%m-%d')}")
+
+    return PAGES[choice_label]
+
+
+# =============================================================================
+#  4.  PAGE: DASHBOARD
+# =============================================================================
+
+def page_dashboard() -> None:
+    """Render the main dashboard / overview page."""
+    st.title("🏠 لوحة التحكم")
+    st.markdown("مرحباً! إليك نظرة عامة على المتجر.")
+    st.divider()
+
+    try:
+        inv_df   = load_inventory()
+        sales_df = load_sales()
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("إجمالي الأجهزة",   len(inv_df))
+        c2.metric("إجمالي المبيعات",  len(sales_df))
+
+        today = date.today().isoformat()
+        sales_today = sales_df[sales_df["sale_date"].astype(str).str.startswith(today)] \
+            if "sale_date" in sales_df.columns else pd.DataFrame()
+        c3.metric("مبيعات اليوم", len(sales_today))
+
+        revenue_today = sales_today["price"].sum() if "price" in sales_today.columns else 0
+        c4.metric("إيراد اليوم (ج.م)", f"{revenue_today:,.0f}")
+
+        st.divider()
+
+        col_left, col_right = st.columns(2)
+
+        with col_left:
+            st.subheader("⚠️ تنبيهات المخزون المنخفض")
+            low = low_stock_alert()
+            if low.empty:
+                st.success("المخزون في مستوى جيد ✅")
             else:
-                st.error(f"❌ {msg}")
+                st.dataframe(low, use_container_width=True)
 
-with tab2:
-    conn = get_connection()
-sales = get_all_sales(conn)
-conn.close()
+        with col_right:
+            st.subheader("🏆 الموديلات الأكثر مبيعاً")
+            top = top_selling_models()
+            if top.empty:
+                st.info("لا توجد بيانات مبيعات بعد.")
+            else:
+                st.dataframe(top, use_container_width=True)
 
-if sales.empty:
-    st.info("📭 لا توجد مبيعات مسجلة حتى الآن")
-else:
-    rename_map = {
-        'sale_id': '#', 'brand': 'الماركة', 'model': 'الموديل',
-        'imei': 'IMEI', 'actual_sale_price': 'سعر البيع',
-        'profit': 'الربح', 'customer_name': 'العميل',
-        'customer_phone': 'الهاتف', 'sale_date': 'تاريخ البيع'
-    }
-    st.dataframe(
-        sales.rename(columns=rename_map),
-        use_container_width=True,
-        hide_index=True
-    )
+    except Exception as exc:
+        st.error(f"تعذّر تحميل بيانات لوحة التحكم: {exc}")
 
-    # إجمالي الأرباح
-    total_profit = sales['profit'].sum()
-    st.markdown(f"""
-    <div style="text-align: center; padding: 16px; margin-top: 12px;
-            background: rgba(0,255,136,0.1); border-radius: 12px; border: 1px solid rgba(0,255,136,0.3);">
-        <span style="color: #8892a4;">إجمالي الأرباح: </span>
-        <span style="color: #00ff88; font-size: 1.5rem; font-weight: 900;
-                font-family: 'JetBrains Mono';">{total_profit:,.0f} ج.م</span>
-    </div>
-    """, unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════════
-# صفحة: البحث الذكي (Smart Search)
-# ══════════════════════════════════════════════════════════════
-def page_search():
-    section_header("البحث الذكي", "🔍")
+# =============================================================================
+#  5.  PAGE: INVENTORY
+# =============================================================================
 
-st.markdown("""
-<div class="scanner-box">
-<div class="scanner-icon">🔎</div>
-<div style="color: var(--accent-cyan); font-weight: 700;">
-    ابحث بأي معلومة — الموديل أو IMEI أو اللون أو الماركة
-</div>
-<div class="scanner-hint">البحث فوري ومباشر بدون الضغط على Enter</div>
-</div>
-""", unsafe_allow_html=True)
+def page_inventory() -> None:
+    """Render the inventory management page."""
+    st.title("📦 إدارة المخزن")
+    st.divider()
 
-col1, col2, col3 = st.columns([3, 1, 1])
-with col1:
-    query = st.text_input(
-    "🔍 ابحث هنا...",
-    placeholder="اكتب الموديل أو الـ IMEI أو اللون...",
-    label_visibility="collapsed",
-    key="smart_search"
-)
-with col2:
-    search_in = st.selectbox("البحث في", ["الكل", "المخزن فقط", "المبيعات فقط"],
-                            label_visibility="collapsed")
-with col3:
-    brand_filter = st.selectbox("الماركة", [
-    "الكل", "Samsung", "Apple", "Huawei", "Xiaomi", "OPPO", "Other"
-], label_visibility="collapsed")
+    tab_view, tab_add, tab_edit = st.tabs(["📋 عرض المخزون", "➕ إضافة جهاز", "✏️ تعديل / حذف"])
 
-if query or brand_filter != "الكل":
-    conn = get_connection()
-results = search_devices(conn, query, brand_filter if brand_filter != "الكل" else None)
-conn.close()
+    # ── View ─────────────────────────────────────────────────────────────────
+    with tab_view:
+        try:
+            df = load_inventory()
+            st.dataframe(df, use_container_width=True, height=420)
+        except Exception as exc:
+            st.error(f"تعذّر تحميل المخزون: {exc}")
 
-if "المبيعات فقط" in search_in:
-    results = results[results['status'] == 'Sold']
-elif "المخزن فقط" in search_in:
-    results = results[results['status'] == 'Available']
+    # ── Add ──────────────────────────────────────────────────────────────────
+    with tab_add:
+        with st.form("form_add_device", clear_on_submit=True):
+            st.subheader("إضافة جهاز جديد")
+            col1, col2 = st.columns(2)
+            brand    = col1.text_input("الماركة *")
+            model    = col2.text_input("الموديل *")
+            imei     = st.text_input("رقم IMEI *", max_chars=15)
+            col3, col4 = st.columns(2)
+            cost     = col3.number_input("سعر الشراء (ج.م)", min_value=0.0, step=50.0)
+            price    = col4.number_input("سعر البيع (ج.م)",  min_value=0.0, step=50.0)
+            color    = col1.text_input("اللون")
+            storage  = col2.text_input("السعة التخزينية")
+            notes    = st.text_area("ملاحظات", height=80)
 
-st.markdown(f"**{len(results)} نتيجة**")
+            submitted = st.form_submit_button("💾 حفظ الجهاز", type="primary")
+            if submitted:
+                if not brand or not model or not imei:
+                    st.warning("الرجاء تعبئة الحقول الإلزامية (*).")
+                else:
+                    try:
+                        add_device(
+                            brand=brand, model=model, imei=imei,
+                            cost=cost, price=price,
+                            color=color, storage=storage, notes=notes,
+                        )
+                        st.success(f"✅ تم إضافة الجهاز {brand} {model} بنجاح!")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"فشل الحفظ: {exc}")
 
-if not results.empty:
-    # تلوين الأجهزة حسب الحالة
-    def highlight_status(row):
-        if row['status'] == 'Sold':
-            return ['background-color: rgba(255,51,102,0.08)'] * len(row)
-        elif row.get('days_in_stock', 0) > 30:
-            return ['background-color: rgba(255,107,53,0.08)'] * len(row)
-        return [''] * len(row)
+    # ── Edit / Delete ─────────────────────────────────────────────────────────
+    with tab_edit:
+        try:
+            df = load_inventory()
+            if df.empty:
+                st.info("لا توجد أجهزة في المخزون.")
+            else:
+                imei_sel = st.selectbox("اختر الجهاز بالـ IMEI", df["imei"].tolist())
+                device   = df[df["imei"] == imei_sel].iloc[0]
 
-    rename_map = {
-        'brand': 'الماركة', 'model': 'الموديل', 'color': 'اللون',
-        'imei': 'IMEI', 'purchase_price': 'سعر الشراء',
-        'expected_sale_price': 'سعر البيع', 'status': 'الحالة',
-        'entry_date': 'تاريخ الإدخال', 'days_in_stock': 'أيام بالمخزن'
-    }
-    st.dataframe(
-        results.rename(columns=rename_map),
-        use_container_width=True,
-        hide_index=True
-    )
-else:
-    st.info("لا توجد نتائج مطابقة")
+                with st.form("form_edit_device"):
+                    col1, col2 = st.columns(2)
+                    new_price = col1.number_input("سعر البيع الجديد", value=float(device.get("price", 0)), step=50.0)
+                    new_color = col2.text_input("اللون", value=str(device.get("color", "")))
+                    new_notes = st.text_area("ملاحظات", value=str(device.get("notes", "")), height=80)
 
-# ══════════════════════════════════════════════════════════════
-# صفحة: التقارير والتصدير (Reports)
-# ══════════════════════════════════════════════════════════════
-def page_reports():
-    section_header("التقارير والتصدير", "📈")
+                    col_upd, col_del = st.columns(2)
+                    update_btn = col_upd.form_submit_button("✏️ تحديث", type="primary")
+                    delete_btn = col_del.form_submit_button("🗑️ حذف",  type="secondary")
 
-    col1, col2 = st.columns(2)
+                if update_btn:
+                    try:
+                        update_device(imei_sel, price=new_price, color=new_color, notes=new_notes)
+                        st.success("✅ تم التحديث بنجاح!")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"فشل التحديث: {exc}")
 
-    with col1:
-        st.markdown("#### 📦 تقرير المخزن")
-        conn = get_connection()
-        inv_data = get_all_devices(conn)
-        conn.close()
+                if delete_btn:
+                    try:
+                        delete_device(imei_sel)
+                        st.success("🗑️ تم الحذف بنجاح!")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"فشل الحذف: {exc}")
 
-        if not inv_data.empty:
-            # إحصاءات المخزن
-            total_val_purchase = inv_data['purchase_price'].sum()
-            total_val_expected = inv_data[inv_data['status']=='Available']['expected_sale_price'].sum()
-            available_count = len(inv_data[inv_data['status']=='Available'])
+        except Exception as exc:
+            st.error(f"تعذّر تحميل الأجهزة: {exc}")
 
-            m1, m2, m3 = st.columns(3)
-            m1.metric("متاح", available_count)
-            m2.metric("قيمة الشراء", f"{total_val_purchase:,.0f}")
-            m3.metric("قيمة البيع المتوقعة", f"{total_val_expected:,.0f}")
 
-            # تصدير Excel
-            excel_inv = export_inventory_excel(inv_data)
-            st.download_button(
-                label="📥 تصدير المخزن — Excel",
-                data=excel_inv,
-                file_name=f"inventory_{date.today()}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
+# =============================================================================
+#  6.  PAGE: SALES
+# =============================================================================
+
+@st.cache_resource
+def _get_ocr_reader():
+    """
+    Initialise EasyOCR reader once per session.
+    Cached via @st.cache_resource so it is never re-loaded on re-runs.
+    """
+    import easyocr  # noqa: PLC0415 – lazy import to avoid hard dependency
+    return easyocr.Reader(["en"], gpu=False)
+
+
+def _extract_imei_from_image(image_bytes: bytes) -> str:
+    """
+    Run EasyOCR on *image_bytes* and return the first 15-digit number found,
+    or an empty string if nothing is detected.
+    """
+    import numpy as np  # noqa: PLC0415
+    from PIL import Image  # noqa: PLC0415
+    import io
+
+    reader  = _get_ocr_reader()
+    img     = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    np_img  = np.array(img)
+    results = reader.readtext(np_img, detail=0)
+
+    for text in results:
+        digits = "".join(filter(str.isdigit, text))
+        if len(digits) == 15:
+            return digits
+    return ""
+
+
+def page_sales() -> None:
+    """Render the sales / point-of-sale page."""
+    st.title("💰 تسجيل عملية بيع")
+    st.divider()
+
+    # ── Session state for IMEI ────────────────────────────────────────────────
+    if "scanned_imei" not in st.session_state:
+        st.session_state["scanned_imei"] = ""
+
+    col_cam, col_form = st.columns([1, 1], gap="large")
+
+    # ── Camera / OCR column ───────────────────────────────────────────────────
+    with col_cam:
+        st.subheader("📷 مسح الـ IMEI")
+        camera_image = st.camera_input("صوّر ملصق الـ IMEI أو الجهاز")
+
+        if camera_image is not None:
+            with st.spinner("🔍 جاري معالجة الصورة…"):
+                try:
+                    detected = _extract_imei_from_image(camera_image.getvalue())
+                    if detected:
+                        st.session_state["scanned_imei"] = detected
+                        st.success(f"✅ تم اكتشاف IMEI: **{detected}**")
+                    else:
+                        st.warning("⚠️ لم يتم اكتشاف رقم IMEI – يمكنك إدخاله يدوياً.")
+                except Exception as exc:
+                    st.error(f"خطأ في معالجة الصورة: {exc}")
+
+        manual = st.text_input(
+            "أو أدخل الـ IMEI يدوياً",
+            value=st.session_state["scanned_imei"],
+            max_chars=15,
+            key="manual_imei_input",
+        )
+        if manual:
+            st.session_state["scanned_imei"] = manual
+
+    # ── Sale form column ──────────────────────────────────────────────────────
+    with col_form:
+        st.subheader("📝 تفاصيل عملية البيع")
+
+        current_imei = st.session_state["scanned_imei"]
+
+        # Try to prefill from inventory
+        device_info = {}
+        if current_imei:
+            try:
+                device_info = get_device_by_imei(current_imei) or {}
+            except Exception:
+                pass
+
+        with st.form("form_sale", clear_on_submit=False):
+            imei_display = st.text_input(
+                "IMEI",
+                value=current_imei,
+                disabled=bool(current_imei),
+            )
+            col1, col2 = st.columns(2)
+            brand = col1.text_input("الماركة",  value=device_info.get("brand", ""))
+            model = col2.text_input("الموديل", value=device_info.get("model", ""))
+            col3, col4 = st.columns(2)
+            sale_price = col3.number_input(
+                "سعر البيع (ج.م)",
+                value=float(device_info.get("price", 0.0)),
+                min_value=0.0,
+                step=50.0,
+            )
+            payment = col4.selectbox("طريقة الدفع", ["كاش", "تحويل بنكي", "فيزا", "تقسيط"])
+            customer_name  = st.text_input("اسم العميل (اختياري)")
+            customer_phone = st.text_input("رقم هاتف العميل (اختياري)")
+            sale_notes     = st.text_area("ملاحظات", height=70)
+
+            confirm = st.form_submit_button("✅ تأكيد البيع", type="primary", use_container_width=True)
+
+        if confirm:
+            if not imei_display:
+                st.warning("الرجاء إدخال رقم IMEI أولاً.")
+            else:
+                try:
+                    record_sale(
+                        imei=imei_display,
+                        brand=brand,
+                        model=model,
+                        sale_price=sale_price,
+                        payment_method=payment,
+                        customer_name=customer_name,
+                        customer_phone=customer_phone,
+                        notes=sale_notes,
+                        sale_date=datetime.now().isoformat(),
+                    )
+                    st.success(f"🎉 تم تسجيل البيع بنجاح! IMEI: {imei_display}")
+                    st.session_state["scanned_imei"] = ""
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"فشل تسجيل البيع: {exc}")
+
+    # ── Recent sales table ────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("🕐 آخر المبيعات")
+    try:
+        recent = load_sales().tail(10).iloc[::-1]
+        st.dataframe(recent, use_container_width=True)
+    except Exception as exc:
+        st.error(f"تعذّر تحميل المبيعات الأخيرة: {exc}")
+
+
+# =============================================================================
+#  7.  PAGE: SMART SEARCH
+# =============================================================================
+
+def page_search() -> None:
+    """Render the smart search page."""
+    st.title("🔍 البحث الذكي")
+    st.divider()
+
+    query = st.text_input("ابحث بالـ IMEI أو الماركة أو الموديل أو اللون…", placeholder="مثال: iPhone 14 أو 358…")
+
+    if query:
+        try:
+            inv_df   = load_inventory()
+            sales_df = load_sales()
+
+            mask_inv = inv_df.apply(
+                lambda row: row.astype(str).str.contains(query, case=False, na=False).any(),
+                axis=1,
+            )
+            mask_sal = sales_df.apply(
+                lambda row: row.astype(str).str.contains(query, case=False, na=False).any(),
+                axis=1,
             )
 
-            # تصدير CSV
-            csv_inv = inv_data.to_csv(index=False, encoding='utf-8-sig')
-            st.download_button(
-                label="📄 تصدير المخزن — CSV",
-                data=csv_inv,
-                file_name=f"inventory_{date.today()}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+            st.subheader(f"نتائج المخزون ({mask_inv.sum()})")
+            if mask_inv.any():
+                st.dataframe(inv_df[mask_inv], use_container_width=True)
+            else:
+                st.info("لا توجد نتائج في المخزون.")
 
-    with col2:
-        st.markdown("#### 💰 تقرير المبيعات")
-        conn = get_connection()
-        sales_data = get_all_sales(conn)
-        conn.close()
+            st.subheader(f"نتائج المبيعات ({mask_sal.sum()})")
+            if mask_sal.any():
+                st.dataframe(sales_df[mask_sal], use_container_width=True)
+            else:
+                st.info("لا توجد نتائج في المبيعات.")
 
-        if not sales_data.empty:
-            total_revenue = sales_data['actual_sale_price'].sum()
-            total_profit = sales_data['profit'].sum()
-            avg_profit = sales_data['profit'].mean()
+        except Exception as exc:
+            st.error(f"خطأ في البحث: {exc}")
 
-            m1, m2, m3 = st.columns(3)
-            m1.metric("إجمالي المبيعات", len(sales_data))
-            m2.metric("إجمالي الإيرادات", f"{total_revenue:,.0f}")
-            m3.metric("صافي الربح", f"{total_profit:,.0f}")
 
-            # تصدير Excel
-            excel_sales = export_sales_excel(sales_data)
-            st.download_button(
-                label="📥 تصدير المبيعات — Excel",
-                data=excel_sales,
-                file_name=f"sales_{date.today()}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
+# =============================================================================
+#  8.  PAGE: REPORTS
+# =============================================================================
 
-            # تصدير CSV
-            csv_sales = sales_data.to_csv(index=False, encoding='utf-8-sig')
-            st.download_button(
-                label="📄 تصدير المبيعات — CSV",
-                data=csv_sales,
-                file_name=f"sales_{date.today()}.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-        else:
-            st.info("لا توجد مبيعات لتصديرها")
+def page_reports() -> None:
+    """Render the reports & analytics page."""
+    st.title("📊 التقارير والإحصاءات")
+    st.divider()
 
-    # ── تقرير شامل ──────────────────────────────────────────
-    st.markdown("---")
-    section_header("التحليل التفصيلي", "📊")
+    tab_sales, tab_inv, tab_top = st.tabs(["💰 تقرير المبيعات", "📦 تقرير المخزون", "🏆 الأكثر مبيعاً"])
 
-    conn = get_connection()
-    inv_data = get_all_devices(conn)
-    sales_data = get_all_sales(conn)
-    conn.close()
+    with tab_sales:
+        try:
+            df = sales_summary()
+            if df.empty:
+                st.info("لا توجد بيانات مبيعات بعد.")
+            else:
+                st.dataframe(df, use_container_width=True)
+                if "revenue" in df.columns:
+                    st.bar_chart(df.set_index(df.columns[0])["revenue"])
+        except Exception as exc:
+            st.error(f"تعذّر تحميل تقرير المبيعات: {exc}")
 
-    if not inv_data.empty:
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.markdown("**توزيع المخزن حسب الماركة**")
-            brand_dist = inv_data.groupby('brand').size().reset_index(name='عدد')
-            st.bar_chart(brand_dist.set_index('brand')['عدد'], color="#00d4ff")
+    with tab_inv:
+        try:
+            df = inventory_summary()
+            if df.empty:
+                st.info("لا توجد بيانات مخزون بعد.")
+            else:
+                st.dataframe(df, use_container_width=True)
+        except Exception as exc:
+            st.error(f"تعذّر تحميل تقرير المخزون: {exc}")
 
-        with col_b:
-            if not sales_data.empty:
-                st.markdown("**أعلى الموديلات مبيعاً**")
-                top_models = sales_data.merge(
-                    inv_data[['imei', 'model', 'brand']], on='imei', how='left'
-                ).groupby('model').size().sort_values(ascending=False).head(8)
-                st.bar_chart(top_models, color="#00ff88")
+    with tab_top:
+        try:
+            df = top_selling_models()
+            if df.empty:
+                st.info("لا توجد بيانات كافية.")
+            else:
+                st.dataframe(df, use_container_width=True)
+                if "count" in df.columns:
+                    st.bar_chart(df.set_index(df.columns[0])["count"])
+        except Exception as exc:
+            st.error(f"تعذّر تحميل تقرير الأكثر مبيعاً: {exc}")
 
-# ══════════════════════════════════════════════════════════════
-# نقطة الدخول الرئيسية
-# ══════════════════════════════════════════════════════════════
-def main():
-    # تهيئة قاعدة البيانات
-    init_db()
 
-    # تحميل CSS
-    load_css()
+# =============================================================================
+#  9.  MAIN — Application entry point
+# =============================================================================
 
-    # الشريط الجانبي والتنقل
+def main() -> None:
+    """
+    Main application driver.
+
+    Execution order
+    ---------------
+    1. Page config  (must be the very first Streamlit call)
+    2. CSS injection
+    3. Database initialisation
+    4. Sidebar render  →  returns current page key
+    5. Page routing   →  delegates to the appropriate page function
+    """
+    # ── 1. Config & styling ──────────────────────────────────────────────────
+    set_page_config()
+    inject_custom_css()
+
+    # ── 2. Database ──────────────────────────────────────────────────────────
+    initialise_database()
+
+    # ── 3. Sidebar / navigation ──────────────────────────────────────────────
     current_page = render_sidebar()
 
-    # توجيه الصفحات
+    # ── 4. Page routing ──────────────────────────────────────────────────────
     if current_page == "dashboard":
         page_dashboard()
     elif current_page == "inventory":
@@ -929,31 +591,10 @@ def main():
         page_search()
     elif current_page == "reports":
         page_reports()
+    else:
+        st.error(f"صفحة غير معروفة: {current_page}")
 
-if __name__ == "__main__":
-    main()
-# --- سطر 911: نقطة الدخول الرئيسية ---
-def main():
-    # 1. تهيئة قاعدة البيانات والـ CSS
-    init_db()
-    load_css()
-    
-    # 2. استدعاء الستارة الجانبية وحفظ الاختيار في متغير
-    # تأكد أن دالة render_sidebar ترجع قيمة (return selected) في نهايتها
-    current_page = render_sidebar() 
-    
-    # 3. توجيه الصفحات (المحرك)
-    if current_page == "لوحة التحكم":
-        page_dashboard()
-    elif current_page == "المخزن":
-        page_inventory()
-    elif current_page == "المبيعات":
-        page_sales() # الدالة اللي صلحنا فيها الـ Tabs والكاميرا
-    elif current_page == "البحث الذكي":
-        page_search()
-    elif current_page == "التقارير":
-        page_reports()
 
-# سطر 933: تشغيل التطبيق
+# =============================================================================
 if __name__ == "__main__":
     main()
