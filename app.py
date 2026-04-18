@@ -7,6 +7,16 @@
 """
 
 import streamlit as st
+import easyocr
+import numpy as np
+from PIL import Image
+
+# تعريف القارئ مرة واحدة عشان ميبطأش البرنامج
+@st.cache_resource
+def load_ocr():
+    return easyocr.Reader(['en'])
+
+reader = load_ocr()
 import pandas as pd
 from datetime import datetime, date
 import io
@@ -555,127 +565,142 @@ def page_sales():
 
         # البحث عن الجهاز أولاً
         # إضافة كاميرا الموبايل للمسح
-        img_file = st.camera_input("📸 امسح السيريال نمبر (IMEI) بالكاميرا")
-        
-        if img_file:
-            st.image(img_file, caption="اللقطة الحالية", width=300)
-            st.info("قم بمطابقة الرقم الظاهر في الصورة مع الخانة أدناه")
+       # 1. الكاميرا للمسح
+img_file = st.camera_input("📷 امسح السيريال نمبر (IMEI) من علبة الموبايل")
 
-        search_imei = st.text_input(
-            "🔢 IMEI / Serial للجهاز المراد بيعه",
-            placeholder="امسح أو اكتب...",
-            key="sale_imei_search"
-        )
+detected_imei = ""
 
+# 2. تحليل الصورة لو المستخدم صور
+if img_file:
+    image = Image.open(img_file)
+    img_array = np.array(image)
+    
+    with st.spinner('جاري استخراج السيريال...'):
+        try:
+            # استخدام الـ reader اللي عرفناه فوق خالص
+            result = reader.readtext(img_array)
+            for (bbox, text, prob) in result:
+                clean_text = "".join(text.split())
+                # التأكد إن الرقم 15 خانة (نظام الـ IMEI)
+                if len(clean_text) == 15 and clean_text.isdigit():
+                    detected_imei = clean_text
+                    st.success(f"✅ تم التقاط السيريال: {detected_imei}")
+                    break
+        except Exception as e:
+            st.error("حدث خطأ في القراءة، حاول تقرب الكاميرا من الرقم")
+
+# 3. خانة الإدخال (تاخد القيمة أوتوماتيك من المتغير detected_imei)
+search_imei = st.text_input("🔢 IMEI / Serial", value=detected_imei, key="sale_imei_search")
+
+device_info = None
+if search_imei:
+    conn = get_connection()
+    device_info = get_device_by_imei(conn, search_imei)
+    conn.close()
+
+if device_info:
+    if device_info['status'] == 'Sold':
+        st.error(f"❌ هذا الجهاز تم بيعه مسبقاً")
         device_info = None
-        if search_imei:
-            conn = get_connection()
-            device_info = get_device_by_imei(conn, search_imei)
-            conn.close()
+    else:
+        st.success(f"✅ تم العثور على الجهاز: {device_info['brand']} {device_info['model']} — {device_info['color']}")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("سعر الشراء", f"{device_info['purchase_price']:,.0f} ج")
+        with col2:
+            st.metric("السعر المتوقع", f"{device_info['expected_sale_price']:,.0f} ج")
+        with col3:
+            st.metric("أيام بالمخزن", device_info.get('days_in_stock', 0))
+else:
+    st.warning("⚠️ لم يتم العثور على الجهاز — تحقق من الـ IMEI")
 
-            if device_info:
-                if device_info['status'] == 'Sold':
-                    st.error(f"❌ هذا الجهاز تم بيعه مسبقاً")
-                    device_info = None
-                else:
-                    st.success(f"✅ تم العثور على الجهاز: {device_info['brand']} {device_info['model']} — {device_info['color']}")
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("سعر الشراء", f"{device_info['purchase_price']:,.0f} ج")
-                    with col2:
-                        st.metric("السعر المتوقع", f"{device_info['expected_sale_price']:,.0f} ج")
-                    with col3:
-                        st.metric("أيام بالمخزن", device_info.get('days_in_stock', 0))
-            else:
-                st.warning("⚠️ لم يتم العثور على الجهاز — تحقق من الـ IMEI")
+st.markdown("---")
 
-        st.markdown("---")
+with st.form("sale_form", clear_on_submit=True):
+    col1, col2 = st.columns(2)
 
-        with st.form("sale_form", clear_on_submit=True):
-            col1, col2 = st.columns(2)
+    with col1:
+        sale_imei = st.text_input(
+            "🔢 IMEI المؤكد",
+            value=search_imei if device_info else "",
+            placeholder="IMEI الجهاز"
+        )
+        customer_name = st.text_input("👤 اسم العميل", placeholder="الاسم الكامل")
+        customer_phone = st.text_input("📞 رقم الهاتف", placeholder="01xxxxxxxxx")
 
-            with col1:
-                sale_imei = st.text_input(
-                    "🔢 IMEI المؤكد",
-                    value=search_imei if device_info else "",
-                    placeholder="IMEI الجهاز"
-                )
-                customer_name = st.text_input("👤 اسم العميل", placeholder="الاسم الكامل")
-                customer_phone = st.text_input("📞 رقم الهاتف", placeholder="01xxxxxxxxx")
+    with col2:
+        default_price = device_info['expected_sale_price'] if device_info else 0.0
+        actual_price = st.number_input(
+            "💵 سعر البيع الفعلي (ج.م)",
+            min_value=0.0,
+            value=float(default_price),
+            step=50.0
+        )
+        sale_date = st.date_input("📅 تاريخ البيع", value=date.today())
 
-            with col2:
-                default_price = device_info['expected_sale_price'] if device_info else 0.0
-                actual_price = st.number_input(
-                    "💵 سعر البيع الفعلي (ج.م)",
-                    min_value=0.0,
-                    value=float(default_price),
-                    step=50.0
-                )
-                sale_date = st.date_input("📅 تاريخ البيع", value=date.today())
-
-                # معاينة الربح
-                if device_info:
-                    profit = actual_price - device_info['purchase_price']
-                    profit_color = "#00ff88" if profit > 0 else "#ff3366"
-                    st.markdown(f"""
-                    <div style="background: var(--bg-card); border: 1px solid var(--border);
-                         border-radius: 10px; padding: 16px; text-align: center; margin-top: 8px;">
-                        <div style="color: var(--text-secondary); font-size: 0.8rem;">الربح المتوقع</div>
-                        <div style="color: {profit_color}; font-size: 1.8rem; font-weight: 900;
-                             font-family: 'JetBrains Mono', monospace;">
-                            {profit:,.0f} ج
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-            submit_sale = st.form_submit_button("✅ تأكيد البيع", use_container_width=True)
-
-            if submit_sale:
-                if not sale_imei:
-                    st.error("❌ الرجاء إدخال الـ IMEI")
-                else:
-                    conn = get_connection()
-                    success, msg = sell_device(
-                        conn, sale_imei, actual_price,
-                        customer_name, customer_phone, str(sale_date)
-                    )
-                    conn.close()
-                    if success:
-                        st.success(f"🎉 تم تسجيل البيع بنجاح! {msg}")
-                        st.balloons()
-                    else:
-                        st.error(f"❌ {msg}")
-
-    with tab2:
-        conn = get_connection()
-        sales = get_all_sales(conn)
-        conn.close()
-
-        if sales.empty:
-            st.info("📭 لا توجد مبيعات مسجلة حتى الآن")
-        else:
-            rename_map = {
-                'sale_id': '#', 'brand': 'الماركة', 'model': 'الموديل',
-                'imei': 'IMEI', 'actual_sale_price': 'سعر البيع',
-                'profit': 'الربح', 'customer_name': 'العميل',
-                'customer_phone': 'الهاتف', 'sale_date': 'تاريخ البيع'
-            }
-            st.dataframe(
-                sales.rename(columns=rename_map),
-                use_container_width=True,
-                hide_index=True
-            )
-
-            # إجمالي الأرباح
-            total_profit = sales['profit'].sum()
+        # معاينة الربح
+        if device_info:
+            profit = actual_price - device_info['purchase_price']
+            profit_color = "#00ff88" if profit > 0 else "#ff3366"
             st.markdown(f"""
-            <div style="text-align: center; padding: 16px; margin-top: 12px;
-                 background: rgba(0,255,136,0.1); border-radius: 12px; border: 1px solid rgba(0,255,136,0.3);">
-                <span style="color: #8892a4;">إجمالي الأرباح: </span>
-                <span style="color: #00ff88; font-size: 1.5rem; font-weight: 900;
-                     font-family: 'JetBrains Mono';">{total_profit:,.0f} ج.م</span>
+            <div style="background: var(--bg-card); border: 1px solid var(--border);
+                    border-radius: 10px; padding: 16px; text-align: center; margin-top: 8px;">
+                <div style="color: var(--text-secondary); font-size: 0.8rem;">الربح المتوقع</div>
+                <div style="color: {profit_color}; font-size: 1.8rem; font-weight: 900;
+                        font-family: 'JetBrains Mono', monospace;">
+                    {profit:,.0f} ج
+                </div>
             </div>
             """, unsafe_allow_html=True)
+
+    submit_sale = st.form_submit_button("✅ تأكيد البيع", use_container_width=True)
+
+    if submit_sale:
+        if not sale_imei:
+            st.error("❌ الرجاء إدخال الـ IMEI")
+        else:
+            conn = get_connection()
+            success, msg = sell_device(
+                conn, sale_imei, actual_price,
+                customer_name, customer_phone, str(sale_date)
+            )
+            conn.close()
+            if success:
+                st.success(f"🎉 تم تسجيل البيع بنجاح! {msg}")
+                st.balloons()
+            else:
+                st.error(f"❌ {msg}")
+
+with tab2:
+    conn = get_connection()
+sales = get_all_sales(conn)
+conn.close()
+
+if sales.empty:
+    st.info("📭 لا توجد مبيعات مسجلة حتى الآن")
+else:
+    rename_map = {
+        'sale_id': '#', 'brand': 'الماركة', 'model': 'الموديل',
+        'imei': 'IMEI', 'actual_sale_price': 'سعر البيع',
+        'profit': 'الربح', 'customer_name': 'العميل',
+        'customer_phone': 'الهاتف', 'sale_date': 'تاريخ البيع'
+    }
+    st.dataframe(
+        sales.rename(columns=rename_map),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # إجمالي الأرباح
+    total_profit = sales['profit'].sum()
+    st.markdown(f"""
+    <div style="text-align: center; padding: 16px; margin-top: 12px;
+            background: rgba(0,255,136,0.1); border-radius: 12px; border: 1px solid rgba(0,255,136,0.3);">
+        <span style="color: #8892a4;">إجمالي الأرباح: </span>
+        <span style="color: #00ff88; font-size: 1.5rem; font-weight: 900;
+                font-family: 'JetBrains Mono';">{total_profit:,.0f} ج.م</span>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════
 # صفحة: البحث الذكي (Smart Search)
@@ -683,66 +708,66 @@ def page_sales():
 def page_search():
     section_header("البحث الذكي", "🔍")
 
-    st.markdown("""
-    <div class="scanner-box">
-        <div class="scanner-icon">🔎</div>
-        <div style="color: var(--accent-cyan); font-weight: 700;">
-            ابحث بأي معلومة — الموديل أو IMEI أو اللون أو الماركة
-        </div>
-        <div class="scanner-hint">البحث فوري ومباشر بدون الضغط على Enter</div>
-    </div>
-    """, unsafe_allow_html=True)
+st.markdown("""
+<div class="scanner-box">
+<div class="scanner-icon">🔎</div>
+<div style="color: var(--accent-cyan); font-weight: 700;">
+    ابحث بأي معلومة — الموديل أو IMEI أو اللون أو الماركة
+</div>
+<div class="scanner-hint">البحث فوري ومباشر بدون الضغط على Enter</div>
+</div>
+""", unsafe_allow_html=True)
 
-    col1, col2, col3 = st.columns([3, 1, 1])
-    with col1:
-        query = st.text_input(
-            "🔍 ابحث هنا...",
-            placeholder="اكتب الموديل أو الـ IMEI أو اللون...",
-            label_visibility="collapsed",
-            key="smart_search"
-        )
-    with col2:
-        search_in = st.selectbox("البحث في", ["الكل", "المخزن فقط", "المبيعات فقط"],
-                                  label_visibility="collapsed")
-    with col3:
-        brand_filter = st.selectbox("الماركة", [
-            "الكل", "Samsung", "Apple", "Huawei", "Xiaomi", "OPPO", "Other"
-        ], label_visibility="collapsed")
+col1, col2, col3 = st.columns([3, 1, 1])
+with col1:
+    query = st.text_input(
+    "🔍 ابحث هنا...",
+    placeholder="اكتب الموديل أو الـ IMEI أو اللون...",
+    label_visibility="collapsed",
+    key="smart_search"
+)
+with col2:
+    search_in = st.selectbox("البحث في", ["الكل", "المخزن فقط", "المبيعات فقط"],
+                            label_visibility="collapsed")
+with col3:
+    brand_filter = st.selectbox("الماركة", [
+    "الكل", "Samsung", "Apple", "Huawei", "Xiaomi", "OPPO", "Other"
+], label_visibility="collapsed")
 
-    if query or brand_filter != "الكل":
-        conn = get_connection()
-        results = search_devices(conn, query, brand_filter if brand_filter != "الكل" else None)
-        conn.close()
+if query or brand_filter != "الكل":
+    conn = get_connection()
+results = search_devices(conn, query, brand_filter if brand_filter != "الكل" else None)
+conn.close()
 
-        if "المبيعات فقط" in search_in:
-            results = results[results['status'] == 'Sold']
-        elif "المخزن فقط" in search_in:
-            results = results[results['status'] == 'Available']
+if "المبيعات فقط" in search_in:
+    results = results[results['status'] == 'Sold']
+elif "المخزن فقط" in search_in:
+    results = results[results['status'] == 'Available']
 
-        st.markdown(f"**{len(results)} نتيجة**")
+st.markdown(f"**{len(results)} نتيجة**")
 
-        if not results.empty:
-            # تلوين الأجهزة حسب الحالة
-            def highlight_status(row):
-                if row['status'] == 'Sold':
-                    return ['background-color: rgba(255,51,102,0.08)'] * len(row)
-                elif row.get('days_in_stock', 0) > 30:
-                    return ['background-color: rgba(255,107,53,0.08)'] * len(row)
-                return [''] * len(row)
+if not results.empty:
+    # تلوين الأجهزة حسب الحالة
+    def highlight_status(row):
+        if row['status'] == 'Sold':
+            return ['background-color: rgba(255,51,102,0.08)'] * len(row)
+        elif row.get('days_in_stock', 0) > 30:
+            return ['background-color: rgba(255,107,53,0.08)'] * len(row)
+        return [''] * len(row)
 
-            rename_map = {
-                'brand': 'الماركة', 'model': 'الموديل', 'color': 'اللون',
-                'imei': 'IMEI', 'purchase_price': 'سعر الشراء',
-                'expected_sale_price': 'سعر البيع', 'status': 'الحالة',
-                'entry_date': 'تاريخ الإدخال', 'days_in_stock': 'أيام بالمخزن'
-            }
-            st.dataframe(
-                results.rename(columns=rename_map),
-                use_container_width=True,
-                hide_index=True
-            )
-        else:
-            st.info("لا توجد نتائج مطابقة")
+    rename_map = {
+        'brand': 'الماركة', 'model': 'الموديل', 'color': 'اللون',
+        'imei': 'IMEI', 'purchase_price': 'سعر الشراء',
+        'expected_sale_price': 'سعر البيع', 'status': 'الحالة',
+        'entry_date': 'تاريخ الإدخال', 'days_in_stock': 'أيام بالمخزن'
+    }
+    st.dataframe(
+        results.rename(columns=rename_map),
+        use_container_width=True,
+        hide_index=True
+    )
+else:
+    st.info("لا توجد نتائج مطابقة")
 
 # ══════════════════════════════════════════════════════════════
 # صفحة: التقارير والتصدير (Reports)
