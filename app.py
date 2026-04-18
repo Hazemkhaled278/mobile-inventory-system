@@ -249,8 +249,7 @@ def load_css():
     }
 
     /* ── إخفاء عناصر Streamlit الافتراضية ── */
-    #MainMenu, footer, header { visibility: hidden; }
-    .stDeployButton { display: none; }
+   
 
     /* ── input fields ── */
     .stTextInput input, .stNumberInput input, .stSelectbox select {
@@ -561,7 +560,7 @@ def page_sales():
         if img_file:
             st.image(img_file, caption="اللقطة الحالية", width=300)
             st.info("قم بمطابقة الرقم الظاهر في الصورة مع الخانة أدناه")
-            
+
         search_imei = st.text_input(
             "🔢 IMEI / Serial للجهاز المراد بيعه",
             placeholder="امسح أو اكتب...",
