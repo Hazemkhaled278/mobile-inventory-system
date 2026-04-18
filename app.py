@@ -555,6 +555,13 @@ def page_sales():
         """, unsafe_allow_html=True)
 
         # البحث عن الجهاز أولاً
+        # إضافة كاميرا الموبايل للمسح
+        img_file = st.camera_input("📸 امسح السيريال نمبر (IMEI) بالكاميرا")
+        
+        if img_file:
+            st.image(img_file, caption="اللقطة الحالية", width=300)
+            st.info("قم بمطابقة الرقم الظاهر في الصورة مع الخانة أدناه")
+            
         search_imei = st.text_input(
             "🔢 IMEI / Serial للجهاز المراد بيعه",
             placeholder="امسح أو اكتب...",
