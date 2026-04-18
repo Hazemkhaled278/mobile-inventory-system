@@ -616,6 +616,35 @@ else:
 
 st.markdown("---")
 
+# --- المحرك الرئيسي للتنقل ---
+# نادى على الـ Sidebar أولاً وخزن الاختيار في متغير
+selected = render_sidebar()
+
+# قاموس لربط الأسماء العربية بالوظائف البرمجية
+pages_map = {
+    "لوحة التحكم": "dashboard",
+    "المخزن": "inventory",
+    "المبيعات": "sales",
+    "البحث الذكي": "search",
+    "التقارير": "reports"
+}
+
+# التنفيذ بناءً على الصفحة المختارة
+if selected in pages_map:
+    page = pages_map[selected]
+    
+    if page == "inventory":
+        from inventory import render_inventory_page
+        render_inventory_page()
+    elif page == "sales":
+        # هنا هتحط كود صفحة المبيعات كله (بما فيه الـ Form اللي في صورة 17d761)
+        st.header("🛒 قسم المبيعات")
+        # استدعاء دالة المبيعات اللي فيها الكاميرا
+        render_sales_page() 
+    elif page == "reports":
+        from reports import render_reports_page
+        render_reports_page()
+
 with st.form("sale_form", clear_on_submit=True):
     col1, col2 = st.columns(2)
 
@@ -901,5 +930,30 @@ def main():
     elif current_page == "reports":
         page_reports()
 
+if __name__ == "__main__":
+    main()
+# --- سطر 911: نقطة الدخول الرئيسية ---
+def main():
+    # 1. تهيئة قاعدة البيانات والـ CSS
+    init_db()
+    load_css()
+    
+    # 2. استدعاء الستارة الجانبية وحفظ الاختيار في متغير
+    # تأكد أن دالة render_sidebar ترجع قيمة (return selected) في نهايتها
+    current_page = render_sidebar() 
+    
+    # 3. توجيه الصفحات (المحرك)
+    if current_page == "لوحة التحكم":
+        page_dashboard()
+    elif current_page == "المخزن":
+        page_inventory()
+    elif current_page == "المبيعات":
+        page_sales() # الدالة اللي صلحنا فيها الـ Tabs والكاميرا
+    elif current_page == "البحث الذكي":
+        page_search()
+    elif current_page == "التقارير":
+        page_reports()
+
+# سطر 933: تشغيل التطبيق
 if __name__ == "__main__":
     main()
